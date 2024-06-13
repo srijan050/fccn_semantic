@@ -12,7 +12,7 @@ import os
 import segmentation_models_pytorch.utils as smp_utils 
 from networks import resnet50
 from complexnn import ComplexBatchNorm2d
-
+import torchvision.transforms as T
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -111,69 +111,6 @@ from torch.utils.data import Dataset
 from PIL import Image
 import torchvision.transforms as transforms
 
-class VocDataset(Dataset):
-    def __init__(self, dir, color_map):
-        self.root = os.path.join(dir, 'VOC2012')
-        self.target_dir = os.path.join(self.root, 'SegmentationClass')
-        self.images_dir = os.path.join(self.root, 'JPEGImages')
-        file_list = os.path.join(self.root, 'ImageSets/Segmentation/trainval.txt')
-        self.files = [line.rstrip() for line in tuple(open(file_list, "r"))]
-        self.color_map = color_map
-
-        # Define the transformations for the images and the masks
-        self.transform = transforms.Compose([
-            transforms.Resize((224, 224)),
-            transforms.ToTensor(),
-            ToHSV(),
-            ToComplex()
-        ])
-
-    def convert_to_segmentation_mask(self, mask):
-        # This function converts color channels of segmentation masks to number of classes (21 in this case)
-        height, width = mask.shape[:2]
-        segmentation_mask = torch.zeros((height, width, len(self.color_map)), dtype=torch.float32)
-        for label_index, label in enumerate(self.color_map):
-            segmentation_mask[:, :, label_index] = (mask == torch.tensor(label, dtype=torch.uint8).unsqueeze(0).unsqueeze(0)).all(dim=-1).float()
-        return segmentation_mask
-
-    def __getitem__(self, index):
-        image_id = self.files[index]
-        image_path = os.path.join(self.images_dir, f"{image_id}.jpg")
-        label_path = os.path.join(self.target_dir, f"{image_id}.png")
-
-        # Open the image and label using PIL
-        image = Image.open(image_path).convert('RGB')
-        label = Image.open(label_path).convert('RGB')
-
-        # Apply transformations
-        image = self.transform(image)
-        label = self.transform(label)
-
-        # Convert labels to segmentation masks
-        label = self.convert_to_segmentage_mask(np.array(label.permute(1, 2, 0)))
-        return image, label
-
-
-
-  
-    def __len__(self):
-        return len(self.files)
-
-data=VocDataset('voc_dataset',VOC_COLORMAP)
-
-batch_size = 10
-
-train_set,val_set=torch.utils.data.random_split(data,[int(len(data)*0.9),round(len(data)*0.1)+1])
-train_loader=DataLoader(train_set,batch_size=batch_size,shuffle=True)
-val_loader=DataLoader(val_set,batch_size=batch_size,shuffle=False)
-
-print('Train Size   : ', len(train_set))
-print('Val Size     : ', len(val_set))
-
-model = ComplexSemantic()
-   
-# criterion = smp.utils.losses.DiceLoss(eps=1.)
-metrics = smp_utils.metrics.IoU(eps=1.)
     
 import math
 
@@ -359,6 +296,73 @@ def convert_complex_to_real(complex_img):
     h = real[...,1,:,:]/(s+ 1e-6)
     return torch.stack([h, s, v], dim=-3)
 
+class VocDataset(Dataset):
+    def __init__(self, dir, color_map):
+        self.root = os.path.join(dir, 'VOC2012')
+        self.target_dir = os.path.join(self.root, 'SegmentationClass')
+        self.images_dir = os.path.join(self.root, 'JPEGImages')
+        file_list = os.path.join(self.root, 'ImageSets/Segmentation/trainval.txt')
+        self.files = [line.rstrip() for line in tuple(open(file_list, "r"))]
+        self.color_map = color_map
+        self.transform_img = T.Compose([
+            T.Resize((224, 224)),
+            T.ToTensor(),
+            ToHSV(),
+            ToComplex()
+        ])
+        self.transform_label = T.Compose([
+            T.Resize((224, 224)),
+            T.ToTensor(),
+        ])
+
+    def convert_to_segmentation_mask(self, mask):
+        height, width = mask.shape[:2]
+        segmentation_mask = np.zeros((height, width, len(self.color_map)), dtype=np.float32)
+        for label_index, label in enumerate(self.color_map):
+            segmentation_mask[:, :, label_index] = np.all(mask == label, axis=-1).astype(float)
+        return segmentation_mask
+
+    def __getitem__(self, index):
+        image_id = self.files[index]
+        image_path = os.path.join(self.images_dir, f"{image_id}.jpg")
+        label_path = os.path.join(self.target_dir, f"{image_id}.png")
+
+        image = Image.open(image_path).convert('RGB')
+        label = Image.open(label_path)
+        
+        image = self.transform_img(image)
+        label = self.transform_label(label)
+        
+        label = np.array(label.permute(1, 2, 0))  # Convert label back to HWC format for processing
+        label = self.convert_to_segmentation_mask(label)
+        label = torch.tensor(label).permute(2, 0, 1).float()  # Convert label back to CHW format for PyTorch
+        
+        return image, label
+
+    def __len__(self):
+        return len(self.files)
+
+
+
+  
+    def __len__(self):
+        return len(self.files)
+
+data=VocDataset('voc_dataset',VOC_COLORMAP)
+
+batch_size = 10
+
+train_set,val_set=torch.utils.data.random_split(data,[int(len(data)*0.9),round(len(data)*0.1)+1])
+train_loader=DataLoader(train_set,batch_size=batch_size,shuffle=True)
+val_loader=DataLoader(val_set,batch_size=batch_size,shuffle=False)
+
+print('Train Size   : ', len(train_set))
+print('Val Size     : ', len(val_set))
+
+model = ComplexSemantic()
+   
+# criterion = smp.utils.losses.DiceLoss(eps=1.)
+metrics = smp_utils.metrics.IoU(eps=1.)
 
 def fit(epochs, model, train_loader, val_loader, criterion, optimizer, scheduler, patch=False):
     torch.cuda.empty_cache()
@@ -388,14 +392,6 @@ def fit(epochs, model, train_loader, val_loader, criterion, optimizer, scheduler
 
             image = image_tiles.to(device)
             mask = mask_tiles.to(device)
-            image = image.permute(0, 3, 1, 2)
-            mask = mask.permute(0, 3, 1, 2)
-            
-            image = rgb_to_hsv_mine(image)
-            cmplx = ToComplex()
-            irgb = ToiRGB()
-            image = cmplx(image)
-            # image = irgb(image)
 
             output = model(image)
             loss = criterion(output, mask)
@@ -429,13 +425,6 @@ def fit(epochs, model, train_loader, val_loader, criterion, optimizer, scheduler
 
                 image = image_tiles.to(device)
                 mask = mask_tiles.to(device)
-                image = image.permute(0, 3, 1, 2)
-                mask = mask.permute(0, 3, 1, 2)
-                image = rgb_to_hsv_mine(image)
-                cmplx = ToComplex()
-                irgb = ToiRGB()
-                image = cmplx(image)
-                # image = irgb(image)
                 output = model(image)
                 val_iou_score += metrics(output, mask)
                 # test_accuracy += pixel_accuracy(output, mask)
