@@ -75,7 +75,6 @@ class ComplexSemantic(nn.Module):
         x_up = self.bn2(x_up)
         x_up = self.relu(x_up)
         logits = self.outc(x_up)
-        logits = self.relu(logits)
         logits = logits.abs()
         # print(f"Shape of output: {logits.shape}")
 
