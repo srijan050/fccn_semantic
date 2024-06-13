@@ -58,7 +58,6 @@ class ComplexSemantic(nn.Module):
         # self.up4 = (Up(128, 64 // factor, bilinear))
         self.outc = nn.Conv2d(64, 21, kernel_size=1, dtype=torch.complex64)
         self.relu = ComplexReLU()
-        self.softmax = nn.Softmax(dim=1)
 
     def forward(self, x):
 
@@ -76,8 +75,8 @@ class ComplexSemantic(nn.Module):
         x_up = self.bn2(x_up)
         x_up = self.relu(x_up)
         logits = self.outc(x_up)
+        logits = self.relu(logits)
         logits = logits.abs()
-        logits = self.softmax(logits)
         # print(f"Shape of output: {logits.shape}")
 
         return logits
