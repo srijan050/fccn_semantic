@@ -106,46 +106,59 @@ VOC_COLORMAP = [
     [0, 64, 128],
 ]
 
+import os
+import torch
+from torch.utils.data import Dataset
+from PIL import Image
+import torchvision.transforms as transforms
+
 class VocDataset(Dataset):
-  def __init__(self,dir,color_map):
-    self.root=os.path.join(dir,'VOC2012')
-    self.target_dir=os.path.join(self.root,'SegmentationClass')
-    self.images_dir=os.path.join(self.root,'JPEGImages')
-    file_list=os.path.join(self.root,'ImageSets/Segmentation/trainval.txt')
-    self.files = [line.rstrip() for line in tuple(open(file_list, "r"))]
-    self.color_map=color_map
+    def __init__(self, dir, color_map):
+        self.root = os.path.join(dir, 'VOC2012')
+        self.target_dir = os.path.join(self.root, 'SegmentationClass')
+        self.images_dir = os.path.join(self.root, 'JPEGImages')
+        file_list = os.path.join(self.root, 'ImageSets/Segmentation/trainval.txt')
+        self.files = [line.rstrip() for line in tuple(open(file_list, "r"))]
+        self.color_map = color_map
 
-  def convert_to_segmentation_mask(self,mask):
-  # This function converts color channels of semgentation masks to number of classes (21 in this case)
-  # Semantic Segmentation requires a segmentation mask to be a NumPy array with the shape [height, width, num_classes].
-  # Each channel in this mask should encode values for a single class. Pixel in a mask channel should have
-  # a value of 1.0 if the pixel of the image belongs to this class and 0.0 otherwise.
-    height, width = mask.shape[:2]
-    segmentation_mask = np.zeros((height, width, len(self.color_map)), dtype=np.float32)
-    for label_index, label in enumerate(self.color_map):
-          segmentation_mask[:, :, label_index] = np.all(mask == label, axis=-1).astype(float)
-    return segmentation_mask
+        # Define the transformations for the images and the masks
+        self.transform = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            ToHSV(),
+            ToComplex()
+        ])
 
-  def __getitem__(self,index):
-    image_id=self.files[index]
-    image_path=os.path.join(self.images_dir,f"{image_id}.jpg")
-    label_path=os.path.join(self.target_dir,f"{image_id}.png")
-    image=cv.imread(image_path)
-    image=cv.cvtColor(image,cv.COLOR_BGR2RGB)
-    image=cv.resize(image,(256,256))
-    image=torch.tensor(image).float()
-    label=cv.imread(label_path)
-    label=cv.cvtColor(label,cv.COLOR_BGR2RGB)
-    label=cv.resize(label,(256,256))
-    label = self.convert_to_segmentation_mask(label)
-    label=torch.tensor(label).float()
-    
-    return image,label
+    def convert_to_segmentation_mask(self, mask):
+        # This function converts color channels of segmentation masks to number of classes (21 in this case)
+        height, width = mask.shape[:2]
+        segmentation_mask = torch.zeros((height, width, len(self.color_map)), dtype=torch.float32)
+        for label_index, label in enumerate(self.color_map):
+            segmentation_mask[:, :, label_index] = (mask == torch.tensor(label, dtype=torch.uint8).unsqueeze(0).unsqueeze(0)).all(dim=-1).float()
+        return segmentation_mask
+
+    def __getitem__(self, index):
+        image_id = self.files[index]
+        image_path = os.path.join(self.images_dir, f"{image_id}.jpg")
+        label_path = os.path.join(self.target_dir, f"{image_id}.png")
+
+        # Open the image and label using PIL
+        image = Image.open(image_path).convert('RGB')
+        label = Image.open(label_path).convert('RGB')
+
+        # Apply transformations
+        image = self.transform(image)
+        label = self.transform(label)
+
+        # Convert labels to segmentation masks
+        label = self.convert_to_segmentage_mask(np.array(label.permute(1, 2, 0)))
+        return image, label
+
 
 
   
-  def __len__(self):
-    return len(self.files)
+    def __len__(self):
+        return len(self.files)
 
 data=VocDataset('voc_dataset',VOC_COLORMAP)
 
