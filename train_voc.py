@@ -9,12 +9,30 @@ import torch.nn.functional as F
 import cv2 as cv
 import time
 import os
+from torch.nn import init
 import segmentation_models_pytorch.utils as smp_utils 
 from networks import resnet50
 from complexnn import ComplexBatchNorm2d
 import torchvision.transforms as T
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+def conv(in_planes, out_planes, kernel_size=3, stride=1, dilation=1, bias=False, transposed=False):
+  if transposed:
+    layer = nn.ConvTranspose2d(in_planes, out_planes, kernel_size=kernel_size, stride=stride, padding=1, output_padding=1, dilation=dilation, bias=bias, dtype = torch.complex64)
+    # Bilinear interpolation init
+    w = torch.Tensor(kernel_size, kernel_size)
+    centre = kernel_size % 2 == 1 and stride - 1 or stride - 0.5
+    for y in range(kernel_size):
+      for x in range(kernel_size):
+        w[y, x] = (1 - abs((x - centre) / stride)) * (1 - abs((y - centre) / stride))
+    layer.weight.data.copy_(w.div(in_planes).repeat(in_planes, out_planes, 1, 1))
+  else:
+    padding = (kernel_size + 2 * (dilation - 1)) // 2
+    layer = nn.Conv2d(in_planes, out_planes, kernel_size=kernel_size, stride=stride, padding=padding, dilation=dilation, bias=bias, dtype = torch.complex64)
+  if bias:
+    init.constant(layer.bias, 0)
+  return layer
 
 def give_encoder(model):
     # takingin resnet50 give_encoder
@@ -39,7 +57,7 @@ class ComplexReLU(nn.Module):
     
 class ComplexSoftMax(nn.Module):
     def forward(self, x):
-        return torch.complex(F.softmax(x.real), F.softmax(x.imag))
+        return torch.complex(F.softmax(x.real, dim = 1), F.softmax(x.imag, dim = 1))
 
 class ComplexSemantic(nn.Module):
     def __init__(self, in_channels=1024, bilinear=False):
@@ -47,38 +65,177 @@ class ComplexSemantic(nn.Module):
         self.encoder = give_encoder(resnet50())
         # factor = 2 if bilinear else 1
         self.up1 = nn.ConvTranspose2d(in_channels, 512, kernel_size=2, stride=2, dtype=torch.complex64)
+        self.conv1 = nn.Conv2d(512, 512, kernel_size = 5, stride = 1, padding = 2, dtype = torch.complex64)
         # self.up1 = (Up(in_channels, 512 // factor, bilinear))
+        self.bn1 = ComplexBatchNorm2d(512)
         self.up2 = nn.ConvTranspose2d(512, 256, kernel_size=2, stride=2, dtype=torch.complex64)
-        self.bn1 = ComplexBatchNorm2d(256)
+        self.conv2 = nn.Conv2d(256, 256, kernel_size = 5, stride = 1, padding = 2, dtype = torch.complex64)
+        self.bn2 = ComplexBatchNorm2d(256)
         # self.up2 = (Up(512, 256 // factor, bilinear))
-        self.up3 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2, dtype=torch.complex64)
-        # self.up3 = (Up(256, 128 // factor, bilinear))
-        self.up4 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2, dtype=torch.complex64)
-        self.bn2 = ComplexBatchNorm2d(64)
-        # self.up4 = (Up(128, 64 // factor, bilinear))
-        self.outc = nn.Conv2d(64, 21, kernel_size=1, dtype=torch.complex64)
+        self.up3 = nn.ConvTranspose2d(256, 21, kernel_size=8, stride=4, padding = 2, dtype=torch.complex64)
+        # self.conv3 = nn.Conv2d(128, 128, kernel_size = 5, stride = 1, padding = 2, dtype = torch.complex64)
+        # self.bn3 = ComplexBatchNorm2d(128)
+        # # self.up3 = (Up(256, 128 // factor, bilinear))
+        # self.up4 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2, dtype=torch.complex64)
+        # self.conv4 = nn.Conv2d(64, 64, kernel_size = 5, stride = 1, padding = 2, dtype = torch.complex64)
+        # self.bn4 = ComplexBatchNorm2d(64)
+        # # self.up4 = (Up(128, 64 // factor, bilinear))
+        # self.outc = nn.Conv2d(64, 21, kernel_size=1, dtype=torch.complex64)
         self.relu = ComplexReLU()
 
     def forward(self, x):
 
-        x_feat = self.encoder(x)
+        enc_layers = list(self.encoder.children())
+        enc1 = enc_layers[0](x)
+        enc2 = enc_layers[1](enc1)
+        enc3 = enc_layers[2](enc2)
+        enc4 = enc_layers[3](enc3)
+        enc5 = enc_layers[4](enc4)
+        enc6 = enc_layers[5](enc5)
+        enc7 = enc_layers[6](enc6)
+        x_feat = enc_layers[7](enc7)
+        # x_feat = self.encoder(x)
         # print(f"Shape of x features: {x_feat.shape}")
         # x_feat = torch.cat([x_feat.real, x_feat.imag], dim=1)
         x_up = self.up1(x_feat)
-        x_up = self.relu(x_up)
-        x_up = self.up2(x_up)
+        x_up = self.conv1(x_up)
         x_up = self.bn1(x_up)
         x_up = self.relu(x_up)
-        x_up = self.up3(x_up)
-        x_up = self.relu(x_up)
-        x_up = self.up4(x_up)
+        x_up = self.up2(x_up + enc6)
+        x_up = self.conv2(x_up)
         x_up = self.bn2(x_up)
         x_up = self.relu(x_up)
+        x_up = self.up3(x_up + enc5)
+        # x_up = self.conv3(x_up)
+        # x_up = self.bn3(x_up)
+        # x_up = self.relu(x_up)
+        # x_up = self.up4(x_up)
+        # x_up = self.conv4(x_up)
+        # x_up = self.bn4(x_up)
+        x_up = self.relu(x_up)
+        # logits = self.outc(x_up)
+        # logits = logits.abs()
+        logits = x_up.abs()
+        # print(f"Shape of output: {logits.shape}")
+
+        return logits
+
+
+class CVSaliency(nn.Module):
+    def __init__(self, in_channels=1024, bilinear=False):
+        super().__init__()
+        self.encoder = give_encoder(resnet50())
+        factor = 2 if bilinear else 1
+        self.up1 = (Up(in_channels, 512 // factor, bilinear))
+        self.up2 = (Up(512, 256 // factor, bilinear))
+        self.up3 = (Up(256, 128 // factor, bilinear))
+        self.up4 = (Up(128, 64 // factor, bilinear))
+        self.outc = (OutConv(64, 21))
+        self.sm = ComplexSoftMax()
+
+    def forward(self, x):
+        enc_layers = list(self.encoder.children())
+        x = enc_layers[0](x)
+        x = enc_layers[1](x)
+        x = enc_layers[2](x)
+        x = enc_layers[3](x)
+        enc5 = enc_layers[4](x)
+        enc6 = enc_layers[5](enc5)
+        enc7 = enc_layers[6](enc6)
+        # print(f"Shape of x features: {x_feat.shape}")
+        x_up = self.up1(enc7)
+        x_up = self.up2(x_up + enc6)
+        x_up = self.up3(x_up + enc5)
+        x_up = self.up4(x_up)
+        logits = self.outc(x_up)
+        logits = self.sm(logits)
+        logits = logits.abs()
+        # print(f"Shape of output: {logits.shape}")
+
+        return logits
+    
+class Model_New(nn.Module):
+    def __init__(self, in_channels=1024, bilinear=False):
+        super().__init__()
+        self.encoder = give_encoder(resnet50())
+        factor = 2 if bilinear else 1
+        self.up1 = nn.ConvTranspose2d(1024, 512, kernel_size=3, stride=2, padding=1, dilation=1, output_padding=1, dtype = torch.complex64)
+        self.bn1 = ComplexBatchNorm2d(512)
+        self.up2 = nn.ConvTranspose2d(512, 256, kernel_size=3, stride=2, padding=1, dilation=1, output_padding=1, dtype = torch.complex64)
+        self.bn2 = ComplexBatchNorm2d(256)
+        self.up3 = nn.ConvTranspose2d(256, 128, kernel_size=3, stride=2, padding=1, dilation=1, output_padding=1, dtype = torch.complex64)
+        self.bn3 = ComplexBatchNorm2d(128)
+        self.up4 = nn.ConvTranspose2d(128, 64, kernel_size=3, stride=2, padding=1, dilation=1, output_padding=1, dtype = torch.complex64)
+        self.bn4 = ComplexBatchNorm2d(64)
+        self.outc = nn.Conv2d(64, 21, kernel_size=1, dtype=torch.complex64)
+        self.relu = ComplexReLU()
+        # self.sm = ComplexSoftMax()
+
+    def forward(self, x):
+        enc_layers = list(self.encoder.children())
+        x = enc_layers[0](x)
+        x = enc_layers[1](x)
+        x = enc_layers[2](x)
+        x = enc_layers[3](x)
+        enc5 = enc_layers[4](x)
+        enc6 = enc_layers[5](enc5)
+        enc7 = enc_layers[6](enc6)
+        # print(f"Shape of x features: {x_feat.shape}")
+        x_up = self.relu(self.up1(enc7))
+        x_up = self.bn1(x_up + enc6)
+        x_up = self.relu(self.up2(x_up))
+        x_up = self.bn2(x_up + enc5)
+        x_up = self.bn3(self.relu(self.up3(x_up)))
+        x_up = self.bn4(self.relu(self.up4(x_up)))
         logits = self.outc(x_up)
         logits = logits.abs()
         # print(f"Shape of output: {logits.shape}")
 
         return logits
+
+
+class Up(nn.Module):
+    def __init__(self, in_channels, out_channels, bilinear=True):
+        super().__init__()
+        if bilinear:
+            self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
+            self.conv = DoubleConv(in_channels, out_channels)
+        else:
+            self.up = nn.ConvTranspose2d(in_channels, in_channels // 2, kernel_size=2, stride=2, dtype = torch.complex64)
+            self.conv = DoubleConv(in_channels // 2, out_channels)
+
+    def forward(self, x1):
+        x1 = self.up(x1)
+        return self.conv(x1)
+
+class OutConv(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(OutConv, self).__init__()
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=1, dtype = torch.complex64)
+
+    def forward(self, x):
+        return self.conv(x)
+
+class DoubleConv(nn.Module):
+    def __init__(self, in_channels, out_channels, mid_channels=None):
+        super().__init__()
+        if not mid_channels:
+            mid_channels = out_channels
+        self.double_conv = nn.Conv2d(in_channels, mid_channels, kernel_size=3, padding=1, bias=False, dtype = torch.complex64)
+        self.bn1 = ComplexBatchNorm2d(mid_channels)
+        self.double_conv2 = nn.Conv2d(mid_channels, out_channels, kernel_size=3, padding=1, bias=False, dtype = torch.complex64)
+        self.bn2 = ComplexBatchNorm2d(out_channels)
+        self.crelu = ComplexReLU()
+        
+
+    def forward(self, x):
+        x = self.double_conv(x)
+        x = self.bn1(x)
+        x = self.crelu(x)
+        x = self.double_conv2(x)
+        x = self.bn2(x)
+        x = self.crelu(x)
+        return x
 
 VOC_COLORMAP = [
     [0, 0, 0],
@@ -259,8 +416,8 @@ class ToComplex(object):
         imag_2 = sat * torch.sin(hue)
         imag_3 = sat
 
-        real = torch.stack([real_1, real_2, real_3], dim= -3)
-        imag = torch.stack([imag_1, imag_2, imag_3], dim= -3)
+        real = torch.stack([real_3, real_1, real_2], dim=-3)
+        imag = torch.stack([imag_3, imag_1, imag_2], dim=-3)
 
         comp_tensor = torch.complex(real, imag)
 
@@ -304,7 +461,7 @@ class VocDataset(Dataset):
         self.files = [line.rstrip() for line in tuple(open(file_list, "r"))]
         self.color_map = color_map
         self.transform_img = T.Compose([
-            T.Resize((224, 224)),
+            # T.Resize((224, 224)),
             T.ToTensor(),
             ToHSV(),
             ToComplex()
@@ -326,13 +483,18 @@ class VocDataset(Dataset):
         image_path = os.path.join(self.images_dir, f"{image_id}.jpg")
         label_path = os.path.join(self.target_dir, f"{image_id}.png")
 
-        image = Image.open(image_path).convert('RGB')
-        label = Image.open(label_path)
+        # image = Image.open(image_path).convert('RGB')
+        image=cv.imread(image_path)
+        image=cv.cvtColor(image,cv.COLOR_BGR2RGB)
+        image=cv.resize(image,(224,224))
+        label = cv.imread(label_path)
+        label = cv.cvtColor(label, cv.COLOR_BGR2RGB)
+        label = cv.resize(label, (224,224))
         
         image = self.transform_img(image)
-        label = self.transform_label(label)
+        # label = self.transform_label(label)
         
-        label = np.array(label.permute(1, 2, 0))  # Convert label back to HWC format for processing
+        # label = np.array(label.permute(1, 2, 0))  # Convert label back to HWC format for processing
         label = self.convert_to_segmentation_mask(label)
         label = torch.tensor(label).permute(2, 0, 1).float()  # Convert label back to CHW format for PyTorch
         
@@ -349,19 +511,24 @@ class VocDataset(Dataset):
 
 data=VocDataset('voc_dataset',VOC_COLORMAP)
 
-batch_size = 10
+batch_size = 4
 
-train_set,val_set=torch.utils.data.random_split(data,[int(len(data)*0.9),round(len(data)*0.1)+1])
+train_size = int(0.8 * len(data))
+test_size = len(data) - train_size
+train_set,val_set=torch.utils.data.random_split(data,[train_size,test_size])
 train_loader=DataLoader(train_set,batch_size=batch_size,shuffle=True)
 val_loader=DataLoader(val_set,batch_size=batch_size,shuffle=False)
 
 print('Train Size   : ', len(train_set))
 print('Val Size     : ', len(val_set))
 
-model = ComplexSemantic()
-   
+model = Model_New()
+model = model.to(device)
 # criterion = smp.utils.losses.DiceLoss(eps=1.)
 metrics = smp_utils.metrics.IoU(eps=1.)
+
+def cmplxsig(x):
+    return torch.complex(F.sigmoid(x.real), F.sigmoid(x.imag))
 
 def fit(epochs, model, train_loader, val_loader, criterion, optimizer, scheduler, patch=False):
     torch.cuda.empty_cache()
@@ -373,7 +540,6 @@ def fit(epochs, model, train_loader, val_loader, criterion, optimizer, scheduler
     min_loss = np.inf
     decrease = 1 ; not_improve=0
 
-    model.to(device)
     fit_time = time.time()
     for e in range(epochs):
         since = time.time()
@@ -406,8 +572,6 @@ def fit(epochs, model, train_loader, val_loader, criterion, optimizer, scheduler
 
             # Step the learning rate
             lrs.append(get_lr(optimizer))
-            scheduler.step()
-
             running_loss += loss.item()
 
         model.eval()
@@ -432,7 +596,10 @@ def fit(epochs, model, train_loader, val_loader, criterion, optimizer, scheduler
 
             train_losses.append(running_loss / len(train_loader))
             test_losses.append(test_loss / len(val_loader))
-
+            
+            
+            scheduler.step(test_loss / len(val_loader))
+            
             if min_loss > (test_loss / len(val_loader)):
                 print('Loss Decreasing.. {:.3f} >> {:.3f} '.format(min_loss, (test_loss / len(val_loader))))
                 min_loss = (test_loss / len(val_loader))
@@ -445,10 +612,11 @@ def fit(epochs, model, train_loader, val_loader, criterion, optimizer, scheduler
                 not_improve += 1
                 min_loss = (test_loss / len(val_loader))
                 print(f'Loss Not Decrease for {not_improve} time')
-                if not_improve == 41:
-                    print('Loss not decrease for 41 times, Stop Training')
+                if not_improve == 26:
+                    print('Loss not decrease for 26 times, Stop Training')
                     break
 
+            
             val_iou.append(val_iou_score / len(val_loader))
             train_iou.append(iou_score / len(train_loader))
             # train_acc.append(accuracy / len(train_loader))
@@ -469,21 +637,61 @@ def fit(epochs, model, train_loader, val_loader, criterion, optimizer, scheduler
     return history
 
 
+
+# def train(model,optim,loss_f,epochs,scheduler):
+#   model = model.to(device)
+#   min_iou=0.3
+#   for epoch in (range(epochs)):
+#     for (X_train,y_train) in train_loader:
+#       X_train,y_train=X_train.to(device),y_train.to(device,dtype=torch.int64)
+#     #   X_train = X_train.permute(0, 3, 1, 2)
+#     #   y_train = y_train.permute(0, 3, 1, 2)
+#       y_pred=model(X_train)
+#       loss=loss_f(y_pred,y_train)
+
+#       optim.zero_grad()
+#       loss.backward()
+#       optim.step()
+#     ious=[]
+#     val_losses=[]
+#     with torch.no_grad():
+#       for b,(X_test,y_test) in enumerate(val_loader):
+#         X_test,y_test=X_test.to(device),y_test.to(device)
+#         # X_test = X_test.permute(0, 3, 1, 2)
+#         # y_test = y_test.permute(0, 3, 1, 2)
+#         y_val=model(X_test)
+#         val_loss=loss_f(y_val,y_test)
+#         val_losses.append(val_loss)
+#         iou_=metrics(y_val,y_test)
+#         ious.append(iou_)
+#       ious=torch.tensor(ious)
+#       val_losses=torch.tensor(val_losses)
+#       scheduler.step(val_losses.mean())
+#       if ious.mean() > min_iou:
+#         min_iou=ious.mean()
+#         # torch.save(model.state_dict(),f"{path_for_models}/unetmodel.pt")
+#         torch.save(model, 'voc_mod.pt')
+#     print(f"epoch : {epoch:2} train_loss: {loss:10.4} , val_loss : {val_losses.mean()} val_iou: {ious.mean()}")
+
+
+
 max_lr = 1e-3
-epoch = 80
+epoch = 50
 weight_decay = 1e-4
 
 # model = torch.load(r'CVSaliency_full.pt', map_location=device)
+# criterion = nn.CrossEntropyLoss()
 criterion = nn.CrossEntropyLoss()
-optimizer = torch.optim.AdamW(model.parameters(), lr=max_lr, weight_decay=weight_decay)
-sched = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr, epochs=epoch,
-                                            steps_per_epoch=len(train_loader))
+optimizer = torch.optim.SGD(model.parameters(), lr=max_lr, momentum=0.9)
+scheduler=torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer,patience=5)
 
-history = fit(epoch, model, train_loader, val_loader, criterion, optimizer, sched)
+hist = fit(epoch, model, train_loader, val_loader, criterion, optimizer, scheduler)
 
-import pickle
-geeky_file = open('history.pickle', 'wb') 
-pickle.dump(history, geeky_file) 
-geeky_file.close() 
+# train(model, optimizer, criterion, epoch, sched)
+
+# import pickle
+# geeky_file = open('history.pickle', 'wb') 
+# pickle.dump(history, geeky_file) 
+# geeky_file.close() 
 
 torch.save(model, 'CVSaliency_full_VOC2012.pt')
